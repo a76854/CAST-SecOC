@@ -1,0 +1,103 @@
+{
+  "configuration_scope": "python_reference_prototype",
+  "embedded_production_configuration": false,
+  "secoc": {
+    "mac_truncation_bits": 64,
+    "freshness_transmitted_bits": 12,
+    "freshness_full_bits": 32,
+    "receive_window": 16,
+    "rollover_policy": "AUTH_RESTRICTED",
+    "timeout_policy": "REJECT_AND_REPORT",
+    "timeout_ms": 100.0,
+    "persistence_policy": "ON_AUTH_UPDATE",
+    "byte_order": "big_endian",
+    "mac_truncation_direction": "leftmost_bytes"
+  },
+  "messages": [
+    {
+      "alias": "PDU-A",
+      "can_id": "0x100",
+      "data_id": 1,
+      "source": "BMS",
+      "destination": "VCU",
+      "payload_bytes": 16,
+      "period_ms": 10,
+      "deadline_ms": 20,
+      "risk": "HIGH",
+      "authenticated_area": [
+        0,
+        12
+      ],
+      "identifier_status": "anonymized_test_value"
+    },
+    {
+      "alias": "PDU-B",
+      "can_id": "0x200",
+      "data_id": 2,
+      "source": "ESC",
+      "destination": "VCU",
+      "payload_bytes": 16,
+      "period_ms": 10,
+      "deadline_ms": 20,
+      "risk": "HIGH",
+      "authenticated_area": [
+        0,
+        10
+      ],
+      "identifier_status": "anonymized_test_value"
+    },
+    {
+      "alias": "PDU-C",
+      "can_id": "0x300",
+      "data_id": 3,
+      "source": "MCU",
+      "destination": "VCU",
+      "payload_bytes": 16,
+      "period_ms": 5,
+      "deadline_ms": 10,
+      "risk": "HIGH",
+      "authenticated_area": [
+        0,
+        12
+      ],
+      "identifier_status": "anonymized_test_value"
+    },
+    {
+      "alias": "PDU-D",
+      "can_id": "0x400",
+      "data_id": 4,
+      "source": "VCU",
+      "destination": "MCU",
+      "payload_bytes": 12,
+      "period_ms": 5,
+      "deadline_ms": 10,
+      "risk": "HIGH",
+      "authenticated_area": [
+        0,
+        8
+      ],
+      "identifier_status": "anonymized_test_value"
+    },
+    {
+      "alias": "PDU-E",
+      "can_id": "0x500",
+      "data_id": 5,
+      "source": "BMS",
+      "destination": "VCU",
+      "payload_bytes": 16,
+      "period_ms": 100,
+      "deadline_ms": 200,
+      "risk": "MEDIUM",
+      "authenticated_area": [
+        0,
+        14
+      ],
+      "identifier_status": "anonymized_test_value"
+    }
+  ],
+  "test_key": {
+    "kind": "public_test_only",
+    "length_bits": 128,
+    "sha256": "374708fff7719dd5979ec875d56cd2286f6d3cf7ec317a3b25632aab28ec37bb"
+  }
+}

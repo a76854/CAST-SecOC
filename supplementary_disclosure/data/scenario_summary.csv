@@ -1,0 +1,6 @@
+﻿Scenario,N,Pass,Fail,Inconclusive,AuthPass,AuthFail,FreshPass,FreshFail,Delivered,Rejected,Errors,DataOrigin
+合法基准通信,25,25,0,0,25,0,25,0,25,0,0,derived_from_selected_execution_records
+受认证区域内载荷篡改,25,25,0,0,0,25,25,0,0,25,0,derived_from_selected_execution_records
+全零认证器伪造,25,25,0,0,0,25,25,0,0,25,0,derived_from_selected_execution_records
+已接收报文重放,25,25,0,0,25,0,0,25,0,25,0,derived_from_selected_execution_records
+严格策略下FV回绕候选,25,25,0,0,25,0,25,0,0,25,0,derived_from_selected_execution_records
