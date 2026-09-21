@@ -1,28 +1,18 @@
-"""
-Experiment definitions — timing benchmarks and functional/security scenarios.
-All experiments run on the same faithful ECU simulator.
-"""
+"""Timing-model and functional/security experiment definitions."""
 import copy
-import math
-import os
 import random
 import statistics
-import struct
-import sys
-import time
 from dataclasses import dataclass, field
-from .config import SecOCConfig, MessageSpec, DEFAULT_MESSAGES, DEFAULT_CONFIG
+from .config import SecOCConfig, MessageSpec
 from .freshness import FreshnessManager, RxState, FvRelation
 from .sender import SecOCSender
 from .receiver import SecOCReceiver
-from .bus import CanFDBus, _frame_tx_time_sec
+from .bus import CanFDBus
 from .perturb import Perturbation, PerturbType, apply_perturbation
-from .verdict import (
-    VectorType, Verdict, determine, config_killed,
-    classify_defect, compute_metrics,
-)
-from .orchestrator import TestOrchestrator, TestVector
-from .sm4 import sm4_cmac, timed
+from .verdict import VectorType, determine
+
+
+FUNCTIONAL_PROCESSING_TIME_SEC = 0.001
 
 
 @dataclass
@@ -45,8 +35,7 @@ def run_timing_experiments(seed: int = 20260714) -> list[TimingResult]:
 
     This is an engineering estimate for experiment design, not board evidence.
     Values are sampled from an explicit cycle/jitter model for a 300 MHz core.
-    Replace this function's output with STM captures before claiming hardware
-    measurements in a publication.
+    These values must not be presented as hardware measurements.
     """
     rng = random.Random(seed)
     results = []
@@ -108,12 +97,13 @@ def run_timing_experiments(seed: int = 20260714) -> list[TimingResult]:
 # ── Functional / Security experiments ──────────────────────────────────
 
 def build_scenario_vectors(messages: list[MessageSpec],
-                           base_config: SecOCConfig) -> list[dict]:
-    """Build all 2000 test vectors across 9 scenarios (Table 7).
-    Each scenario is constructed faithfully — no data fitting.
+                           base_config: SecOCConfig,
+                           seed: int = 20260714) -> list[dict]:
+    """Build 2,000 deterministic test vectors across nine scenarios.
     Returns list of scenario descriptors that the executor runs.
     """
     scenarios = []
+    rng = random.Random(seed)
 
     # Key assignments per context
     keys = {
@@ -129,9 +119,7 @@ def build_scenario_vectors(messages: list[MessageSpec],
         vector_idx[0] += 1
         return vector_idx[0]
 
-    fm = FreshnessManager(bit_width=32, trunc_bits=12, window=16)
-
-    # ── Scenario 1: Legitimate baseline (160 vectors) ──
+    # Legitimate baseline
     for msg in messages:
         for _ in range(32):
             cfg = copy.deepcopy(base_config)
@@ -143,14 +131,14 @@ def build_scenario_vectors(messages: list[MessageSpec],
                 vtype=VectorType.VALID, key=key, bus_load=0.30,
             ))
 
-    # ── Scenario 2: Payload tampering in auth region (200 vectors) ──
+    # Payload tampering inside the authenticated region
     for msg in messages:
         for _ in range(40):
             cfg = copy.deepcopy(base_config)
             cfg.A = msg.auth_area
             o, n = msg.auth_area
             # Tamper at random position inside auth region
-            pos = o + random.randint(0, max(0, n - 1))
+            pos = o + rng.randint(0, max(0, n - 1))
             perturb = Perturbation(
                 ptype=PerturbType.TAMPER_AUTH_REGION,
                 tamper_positions=[pos],
@@ -163,7 +151,7 @@ def build_scenario_vectors(messages: list[MessageSpec],
                 vtype=VectorType.TAMPER, key=key, bus_load=0.30,
             ))
 
-    # ── Scenario 3: MAC forgery (200 vectors) ──
+    # MAC forgery
     for msg in messages:
         for _ in range(40):
             cfg = copy.deepcopy(base_config)
@@ -177,7 +165,7 @@ def build_scenario_vectors(messages: list[MessageSpec],
                 vtype=VectorType.TAMPER, key=key, bus_load=0.30,
             ))
 
-    # ── Scenario 4: Historical replay + FV rollback (220 vectors) ──
+    # Historical replay and freshness rollback
     # First capture legitimate PDUs, then replay them
     captured = {}
     for msg in messages:
@@ -196,7 +184,7 @@ def build_scenario_vectors(messages: list[MessageSpec],
         for _ in range(44):
             cfg = copy.deepcopy(base_config)
             cfg.A = msg.auth_area
-            replay_pdu = random.choice(captured.get(msg.data_id, [b'\x00'] * 32))
+            replay_pdu = rng.choice(captured.get(msg.data_id, [b'\x00'] * 32))
             perturb = Perturbation(ptype=PerturbType.REPLAY_HISTORICAL, replay_pdu=replay_pdu)
             scenarios.append(dict(
                 id=next_id(), scenario="历史重放与FV回退",
@@ -205,10 +193,12 @@ def build_scenario_vectors(messages: list[MessageSpec],
                 vtype=VectorType.REPLAY, key=key, bus_load=0.30,
             ))
 
-    # ── Scenario 5: Window boundary (260 vectors) ──
+    # Receive-window boundaries
     for w in [8, 16, 32, 64]:
         for msg in messages:
-            for window_pos in [w - 1, w, w + 1]:
+            # Thirteen cases per message/window pair gives 260 total.
+            positions = ([w - 1, w, w + 1] * 4) + [w + 1]
+            for window_pos in positions:
                 cfg = copy.deepcopy(base_config)
                 cfg.A = msg.auth_area
                 cfg.W = w
@@ -222,7 +212,7 @@ def build_scenario_vectors(messages: list[MessageSpec],
                     vtype=svtype, key=key, bus_load=0.30,
                 ))
 
-    # ── Scenario 6: FV rollover (220 vectors, includes M1) ──
+    # Freshness-value rollover
     # The sender uses a naturally low FV (post-rollover epoch).
     # The receiver is at ROLLOVER_PENDING (fv_last near 2^32).
     # PDU is built with correct MAC for the low FV — no perturbation.
@@ -237,39 +227,37 @@ def build_scenario_vectors(messages: list[MessageSpec],
                 fv_rel=FvRelation.WRAP_CANDIDATE,
                 config=cfg, perturbation=perturb,
                 vtype=VectorType.BOUNDARY_OUT, key=key, bus_load=0.30,
-                sender_fv=random.randint(0, 5),  # Post-rollover low FV
+                sender_fv=rng.randint(0, 5),  # Post-rollover low FV
             ))
 
-    # ── Scenario 7: MAC length policy (260 vectors, includes M2) ──
+    # MAC-length policy
     for ell in [16, 24, 32, 64]:
         for msg in messages:
-            cfg = copy.deepcopy(base_config)
-            cfg.A = msg.auth_area
-            cfg.ell = ell
-            perturb = Perturbation(ptype=PerturbType.NONE)
-            scenarios.append(dict(
-                id=next_id(), scenario="认证器长度策略",
-                msg=msg, state=RxState.SYNC, fv_rel=FvRelation.NEXT,
-                config=cfg, perturbation=perturb,
-                vtype=VectorType.CONFIG, key=key, bus_load=0.30,
-            ))
-            # Also test with tampering at each length
-            perturb_t = Perturbation(ptype=PerturbType.FORGE_MAC, forge_mac_type="random")
-            scenarios.append(dict(
-                id=next_id(), scenario="认证器长度策略",
-                msg=msg, state=RxState.SYNC, fv_rel=FvRelation.NEXT,
-                config=cfg, perturbation=perturb_t,
-                vtype=VectorType.TAMPER, key=key, bus_load=0.30,
-            ))
+            for case_index in range(13):
+                cfg = copy.deepcopy(base_config)
+                cfg.A = msg.auth_area
+                cfg.ell = ell
+                forged = case_index % 2 == 1
+                perturb = Perturbation(
+                    ptype=PerturbType.FORGE_MAC if forged else PerturbType.NONE,
+                    forge_mac_type="random",
+                )
+                scenarios.append(dict(
+                    id=next_id(), scenario="认证器长度策略",
+                    msg=msg, state=RxState.SYNC, fv_rel=FvRelation.NEXT,
+                    config=cfg, perturbation=perturb,
+                    vtype=VectorType.TAMPER if forged else VectorType.VALID,
+                    key=key, bus_load=0.30,
+                ))
 
-    # ── Scenario 8: Crypto context mapping mutation (220 vectors, M3) ──
+    # Cryptographic-context mapping mutation
     for msg in messages:
         for _ in range(44):
             cfg = copy.deepcopy(base_config)
             cfg.A = msg.auth_area
             # Cross-context: use data_id of a different message
             other_msgs = [m for m in messages if m.data_id != msg.data_id]
-            other = random.choice(other_msgs)
+            other = rng.choice(other_msgs)
             perturb = Perturbation(ptype=PerturbType.CROSS_CONTEXT,
                                   cross_data_id=other.data_id,
                                   cross_key=keys[1])
@@ -280,25 +268,26 @@ def build_scenario_vectors(messages: list[MessageSpec],
                 vtype=VectorType.CONFIG, key=key, bus_load=0.30,
             ))
 
-    # ── Scenario 9: High load injection (260 vectors) ──
-    for load in [0.70, 0.85, 0.95]:
-        for msg in messages:
-            for _ in range(17):
-                cfg = copy.deepcopy(base_config)
-                cfg.A = msg.auth_area
-                is_valid = random.random() < 0.5
-                if is_valid:
-                    perturb = Perturbation(ptype=PerturbType.NONE)
-                    svtype = VectorType.VALID
-                else:
-                    perturb = Perturbation(ptype=PerturbType.FORGE_MAC, forge_mac_type="random")
-                    svtype = VectorType.TAMPER
-                scenarios.append(dict(
-                    id=next_id(), scenario="高负载注入",
-                    msg=msg, state=RxState.SYNC, fv_rel=FvRelation.NEXT,
-                    config=cfg, perturbation=perturb,
-                    vtype=svtype, key=key, bus_load=load,
-                ))
+    # High-load injection
+    loads = [0.70, 0.85, 0.95]
+    for case_index in range(260):
+        load = loads[case_index % len(loads)]
+        msg = messages[(case_index // len(loads)) % len(messages)]
+        cfg = copy.deepcopy(base_config)
+        cfg.A = msg.auth_area
+        is_valid = rng.random() < 0.5
+        if is_valid:
+            perturb = Perturbation(ptype=PerturbType.NONE)
+            svtype = VectorType.VALID
+        else:
+            perturb = Perturbation(ptype=PerturbType.FORGE_MAC, forge_mac_type="random")
+            svtype = VectorType.TAMPER
+        scenarios.append(dict(
+            id=next_id(), scenario="高负载注入",
+            msg=msg, state=RxState.SYNC, fv_rel=FvRelation.NEXT,
+            config=cfg, perturbation=perturb,
+            vtype=svtype, key=key, bus_load=load,
+        ))
 
     return scenarios
 
@@ -306,6 +295,8 @@ def build_scenario_vectors(messages: list[MessageSpec],
 def execute_scenario(scenario: dict) -> dict:
     """Execute a single test scenario and return the result record."""
     s = scenario
+    input_seed = s.get("input_seed", 20260714 + s["id"])
+    rng = random.Random(input_seed)
     fm = FreshnessManager(bit_width=s["config"].b,
                           trunc_bits=s["config"].lambda_,
                           window=s["config"].W)
@@ -323,17 +314,23 @@ def execute_scenario(scenario: dict) -> dict:
         fm.prepare_rollover_pending()
 
     # Build secured PDU
-    # For rollover scenarios: sender uses independent low FV counter
+    # Boundary cases need a valid MAC for the intended full freshness value.
     if "sender_fv" in s:
         fm_tx = FreshnessManager(bit_width=s["config"].b,
                                  trunc_bits=s["config"].lambda_,
                                  window=s["config"].W)
         fm_tx._counter = s["sender_fv"]
         sender = SecOCSender(s["config"], fm_tx)
+    elif s["perturbation"].ptype == PerturbType.WINDOW_BOUNDARY:
+        fm_tx = FreshnessManager(bit_width=s["config"].b,
+                                 trunc_bits=s["config"].lambda_,
+                                 window=s["config"].W)
+        fm_tx._counter = fm.rx_state.fv_last + s["perturbation"].window_position
+        sender = SecOCSender(s["config"], fm_tx)
     else:
         sender = SecOCSender(s["config"], fm)
-    payload = os.urandom(s["msg"].payload_len)
-    p_wire, tx_time = sender.build_secured_pdu(payload, s["msg"].data_id, s["key"])
+    payload = rng.randbytes(s["msg"].payload_len)
+    p_wire, _ = sender.build_secured_pdu(payload, s["msg"].data_id, s["key"])
 
     # For replay: use historical PDU
     if s["perturbation"].ptype == PerturbType.REPLAY_HISTORICAL and s["perturbation"].replay_pdu:
@@ -349,23 +346,27 @@ def execute_scenario(scenario: dict) -> dict:
         cross_key = s["perturbation"].cross_key or s["key"]
         p_wire, _ = sender2.build_secured_pdu(payload, s["perturbation"].cross_data_id, cross_key)
 
-    # Apply perturbation
-    p_wire = apply_perturbation(p_wire, s["perturbation"], s["config"])
+    # The boundary sender already emitted the intended value with a valid MAC.
+    if s["perturbation"].ptype != PerturbType.WINDOW_BOUNDARY:
+        p_wire = apply_perturbation(
+            p_wire, s["perturbation"], s["config"], rng,
+        )
 
     # Bus delay
-    bus = CanFDBus(load=s["bus_load"])
+    bus = CanFDBus(load=s["bus_load"], rng=rng)
     bus_delay = bus.transmit(len(p_wire))
 
     # Process at receiver
     receiver = SecOCReceiver(s["config"], fm, s["key"])
-    resp = receiver.process(p_wire, s["msg"].data_id)
-    resp["tau"] += bus_delay
+    resp = receiver.process(p_wire, s["msg"].data_id, measure=False)
+    resp["tau"] += FUNCTIONAL_PROCESSING_TIME_SEC + bus_delay
 
     # Verdict
     verdict = determine(s["vtype"], resp, s["msg"].deadline_ms)
 
     return dict(
         VectorID=s["id"],
+        InputSeed=input_seed,
         Scenario=s["scenario"],
         MsgID=s["msg"].data_id,
         StateBefore=s["state"].name,
@@ -383,24 +384,6 @@ def execute_scenario(scenario: dict) -> dict:
         DeadlineMs=s["msg"].deadline_ms,
     )
 
-
-# ── Helper: timing measurement ──────────────────────────────────────
-
-def _measure_timing(fn, n_per_round: int, n_rounds: int,
-                    warmup: int) -> list[float]:
-    """Run timing measurement with warmup and multiple rounds."""
-    # Warmup
-    for _ in range(warmup):
-        fn()
-
-    all_times = []
-    for _ in range(n_rounds):
-        round_times = []
-        for _ in range(n_per_round):
-            _, elapsed = timed(fn)
-            round_times.append(elapsed)
-        all_times.extend(round_times)
-    return all_times
 
 
 # ── Statistics helpers ──────────────────────────────────────────────

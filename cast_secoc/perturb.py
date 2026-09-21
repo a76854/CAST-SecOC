@@ -3,10 +3,7 @@ Perturbation operators Γ — tampering, forgery, replay, boundary manipulation.
 These act on P_wire (the Secured I-PDU) at the bus level, simulating
 what an attacker or test controller can do.
 """
-import copy
-import os
 import random
-import struct
 from dataclasses import dataclass
 from enum import Enum, auto
 from .config import SecOCConfig
@@ -51,14 +48,17 @@ class Perturbation:
 
 
 def apply_perturbation(p_wire: bytes, perturbation: Perturbation,
-                       config: SecOCConfig) -> bytes:
+                       config: SecOCConfig,
+                       rng: random.Random | None = None) -> bytes:
     """Apply perturbation to a Secured I-PDU. Returns modified P_wire."""
+    rng = rng or random.SystemRandom()
     ptype = perturbation.ptype
     result = bytearray(p_wire)
 
-    auth_len = config.A[1] if config.A[1] <= len(p_wire) else len(p_wire)
     fv_bytes = (config.lambda_ + 7) // 8
     mac_bytes = config.ell // 8
+    if len(p_wire) <= fv_bytes + mac_bytes:
+        raise ValueError("secured PDU is too short for the configured fields")
     pos = len(p_wire) - fv_bytes - mac_bytes
     fv_pos = pos
     mac_pos = pos + fv_bytes
@@ -81,34 +81,38 @@ def apply_perturbation(p_wire: bytes, perturbation: Perturbation,
 
     elif ptype == PerturbType.FORGE_MAC:
         if perturbation.forge_mac_type == "random":
-            result[mac_pos:mac_pos + mac_bytes] = os.urandom(mac_bytes)
+            result[mac_pos:mac_pos + mac_bytes] = rng.randbytes(mac_bytes)
         elif perturbation.forge_mac_type == "zero":
             result[mac_pos:mac_pos + mac_bytes] = b'\x00' * mac_bytes
         elif perturbation.forge_mac_type == "swap":
             # Swap with another message's MAC
             half = mac_bytes // 2
-            result[mac_pos:mac_pos + half] = result[mac_pos + half:mac_pos + mac_bytes]
+            tag = bytes(result[mac_pos:mac_pos + mac_bytes])
+            result[mac_pos:mac_pos + mac_bytes] = tag[half:] + tag[:half]
+        else:
+            raise ValueError("unsupported MAC forgery type")
 
     elif ptype == PerturbType.REPLAY_HISTORICAL:
         if perturbation.replay_pdu:
             return perturbation.replay_pdu
 
     elif ptype == PerturbType.FV_MANIPULATE:
+        fv_mask = (1 << config.lambda_) - 1
         if perturbation.fv_force_value is not None:
-            val = perturbation.fv_force_value & ((1 << (fv_bytes * 8)) - 1)
+            val = perturbation.fv_force_value & fv_mask
             result[fv_pos:fv_pos + fv_bytes] = val.to_bytes(fv_bytes, 'big')
         else:
             current = int.from_bytes(result[fv_pos:fv_pos + fv_bytes], 'big')
-            new_val = (current + perturbation.fv_offset) & ((1 << (fv_bytes * 8)) - 1)
+            new_val = (current + perturbation.fv_offset) & fv_mask
             result[fv_pos:fv_pos + fv_bytes] = new_val.to_bytes(fv_bytes, 'big')
 
     elif ptype == PerturbType.WINDOW_BOUNDARY:
-        val = perturbation.window_position & ((1 << (fv_bytes * 8)) - 1)
+        val = perturbation.window_position & ((1 << config.lambda_) - 1)
         result[fv_pos:fv_pos + fv_bytes] = val.to_bytes(fv_bytes, 'big')
 
     elif ptype == PerturbType.ROLLOVER_CANDIDATE:
         # Force FV to a low value simulating post-rollover
-        low_val = perturbation.window_position & ((1 << (fv_bytes * 8)) - 1)
+        low_val = perturbation.window_position & ((1 << config.lambda_) - 1)
         result[fv_pos:fv_pos + fv_bytes] = low_val.to_bytes(fv_bytes, 'big')
 
     elif ptype == PerturbType.CROSS_CONTEXT:

@@ -1,9 +1,4 @@
-"""
-SecOC Sender — Eq.(1)–(4).
-Constructs Secured I-PDU from Authentic I-PDU, applies SM4-CMAC,
-truncates FV and MAC, measures timing.
-"""
-import os
+"""Build secured I-PDUs with freshness data and a truncated SM4-CMAC."""
 import struct
 import time
 from .sm4 import sm4_cmac, timed
@@ -20,33 +15,39 @@ class SecOCSender:
 
     def build_secured_pdu(self, auth_ipdu: bytes, data_id: int, key: bytes,
                           measure: bool = True) -> tuple[bytes, float]:
-        """Build a Secured I-PDU — Eq.(1).
+        """Build a secured I-PDU.
         Returns (P_wire, elapsed_seconds).
         """
         t0 = time.perf_counter() if measure else 0.0
+        self.config.validate(len(auth_ipdu))
+        if len(key) != 16:
+            raise ValueError("SM4 key must be 16 bytes")
 
         # Get fresh FV
         fv_full = self.fm.next_fv()
         fv_tr = self.fm.truncate(fv_full)
 
-        # Build authentication data — Eq.(3)
+        # Authenticate the configured payload region and full freshness value.
         o, n = self.config.A
         if n > len(auth_ipdu):
             n = len(auth_ipdu)
         auth_region = auth_ipdu[o:o + n]
 
-        d_auth = struct.pack('>H', data_id & 0xFFFF)
+        if not 0 <= data_id <= 0xFFFF:
+            raise ValueError("DataID must fit in 16 bits")
+        d_auth = struct.pack('>H', data_id)
         d_auth += auth_region
-        d_auth += struct.pack('>I', fv_full)
+        full_fv_bytes = (self.config.b + 7) // 8
+        d_auth += fv_full.to_bytes(full_fv_bytes, 'big')
 
-        # SM4-CMAC — Eq.(4)
+        # Compute and truncate SM4-CMAC.
         mac_full, mac_time = timed(sm4_cmac, key, d_auth)
 
         # Truncate MAC
         ell_bytes = self.config.ell // 8
         mac_tr = mac_full[:ell_bytes]
 
-        # Assemble P_wire — Eq.(1): [Header] || P_auth || [FV_tr] || T_tr
+        # Wire format: authentic I-PDU || transmitted FV || truncated MAC.
         fv_byte_len = (self.config.lambda_ + 7) // 8
         fv_tr_bytes = fv_tr.to_bytes(fv_byte_len, 'big')
         p_wire = auth_ipdu + fv_tr_bytes + mac_tr

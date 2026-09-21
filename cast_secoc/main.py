@@ -1,51 +1,35 @@
 #!/usr/bin/env python3
-"""
-CAST-SecOC Simulation — Main entry point.
-Runs all experiments and reports naturally emerging results.
-No data fitting. No artificial calibration.
-"""
+"""Command-line entry point for the SecOC reference experiments."""
+import argparse
 import copy
 import csv
 import json
-import os
-import random
-import statistics
-import sys
-import time
 from collections import defaultdict
+from pathlib import Path
 
-from cast_secoc.config import (
-    SecOCConfig, MessageSpec, DEFAULT_MESSAGES, DEFAULT_CONFIG,
-)
-from cast_secoc.freshness import FreshnessManager, RxState, FvRelation
+from cast_secoc.config import DEFAULT_MESSAGES, DEFAULT_CONFIG
+from cast_secoc.freshness import FreshnessManager
 from cast_secoc.sender import SecOCSender
 from cast_secoc.receiver import SecOCReceiver
-from cast_secoc.bus import CanFDBus
-from cast_secoc.perturb import Perturbation, PerturbType, apply_perturbation
-from cast_secoc.verdict import (
-    VectorType, Verdict, determine, config_killed,
-    classify_defect, compute_metrics,
-)
+from cast_secoc.verdict import VectorType, determine, config_killed
 from cast_secoc.experiments import (
     run_timing_experiments, build_scenario_vectors,
-    execute_scenario, TimingResult, _mean, _std, _median, _percentile, _ms,
+    execute_scenario, TimingResult,
 )
-from cast_secoc.sm4 import sm4_cmac, timed
 
 
-OUTPUT_DIR = "results"
-os.makedirs(OUTPUT_DIR, exist_ok=True)
+OUTPUT_DIR = Path("results")
 
 
-def main():
+def main(output_dir: Path = OUTPUT_DIR):
+    output_dir.mkdir(parents=True, exist_ok=True)
     print("=" * 72)
     print("  CAST-SecOC Simulation — Faithful ECU Simulator")
     print("  Functional results: protocol simulation; timing: labelled TC397 parameter model.")
     print("=" * 72)
 
-    # ── Part 1: Timing experiments ──────────────────────────────────
     print("\n" + "─" * 72)
-    print("  Part 1: SM4-CMAC & End-to-End Timing")
+    print("  SM4-CMAC & End-to-End Timing")
     print("─" * 72)
     timing_results = run_timing_experiments(seed=20260714)
     print_timing_table(timing_results)
@@ -61,23 +45,21 @@ def main():
             data_source="TC397 300 MHz 参数化仿真（非硬件实测）",
             model_seed=20260714,
         ))
-    with open(f"{OUTPUT_DIR}/timing.json", "w") as f:
+    with (output_dir / "timing.json").open("w", encoding="utf-8") as f:
         _json.dump(timing_json, f, indent=2)
-    with open(f"{OUTPUT_DIR}/timing.csv", "w", newline="") as f:
+    with (output_dir / "timing.csv").open("w", newline="", encoding="utf-8") as f:
         fields = list(timing_json[0])
         writer = csv.DictWriter(f, fieldnames=fields)
         writer.writeheader()
         writer.writerows(timing_json)
 
-    # ── Part 2: Message-level timing margin ─────────────────────────
     print("\n" + "─" * 72)
-    print("  Part 2: Message-Level Timing Margin (Eq.45)")
+    print("  Message-Level Timing Margin")
     print("─" * 72)
     print_timing_margin(timing_results)
 
-    # ── Part 3: Functional & security scenarios ─────────────────────
     print("\n" + "─" * 72)
-    print("  Part 3: Functional & Security Scenarios (2000 vectors)")
+    print("  Functional & Security Scenarios (2000 vectors)")
     print("─" * 72)
     scenarios = build_scenario_vectors(DEFAULT_MESSAGES, DEFAULT_CONFIG)
     print(f"  Generated {len(scenarios)} test vectors across 9 scenarios.")
@@ -91,41 +73,37 @@ def main():
 
     print(f"  All {len(results)} vectors executed.\n")
 
-    # ── Part 4: Key metrics (Table 9) ───────────────────────────────
     print("─" * 72)
-    print("  Part 4: Key Metrics by Scenario Group (Table 9)")
+    print("  Key Metrics by Scenario Group")
     print("─" * 72)
     print_metrics_table(results)
 
-    # ── Part 5: Multi-dimensional response matrix (Table 10) ────────
     print("\n" + "─" * 72)
-    print("  Part 5: Multi-Dimensional Response Matrix (Table 10)")
+    print("  Multi-Dimensional Response Matrix")
     print("─" * 72)
     print_response_matrix(results)
 
-    # ── Part 6: Controlled config mutations (Table 11) ──────────────
     print("\n" + "─" * 72)
-    print("  Part 6: Controlled Configuration Mutations (Table 11)")
+    print("  Controlled Configuration Mutations")
     print("─" * 72)
-    run_config_mutations(results)
+    run_config_mutations()
 
-    # ── Part 7: Coverage (Eq.42) ────────────────────────────────────
     print("\n" + "─" * 72)
-    print("  Part 7: Coverage Breakdown (Eq.42)")
+    print("  Coverage Breakdown")
     print("─" * 72)
     print_coverage(results, scenarios)
 
     # ── Save results ────────────────────────────────────────────────
-    with open(f"{OUTPUT_DIR}/results.json", "w") as f:
+    with (output_dir / "results.json").open("w", encoding="utf-8") as f:
         json.dump(results, f, indent=2, default=str)
-    print(f"\n  Full results saved to {OUTPUT_DIR}/results.json")
-    print(f"  Timing data saved to {OUTPUT_DIR}/timing.json")
+    print(f"\n  Full results saved to {output_dir / 'results.json'}")
+    print(f"  Timing data saved to {output_dir / 'timing.json'}")
 
 
-# ── Output Tables ──────────────────────────────────────────────────────
+# ── Output formatting ──────────────────────────────────────────────────────
 
 def print_timing_table(results: list[TimingResult]):
-    """Table 8: Timing statistics."""
+    """Print timing statistics."""
     hdr = f"  {'测试项':<16s} {'条件':<20s} {'样本':>6s} {'均值/ms':>8s} {'标准差':>8s} {'中位数':>8s} {'P95':>8s} {'P99':>8s}"
     print(hdr)
     print("  " + "-" * (len(hdr) - 2))
@@ -136,7 +114,7 @@ def print_timing_table(results: list[TimingResult]):
 
 
 def print_timing_margin(results: list[TimingResult]):
-    """Eq.(45): Message-level timing margin."""
+    """Print the message-level timing margin."""
     # Extract sender and receiver P99 for 16B
     tx_p99 = {}
     rx_p99 = {}
@@ -173,7 +151,8 @@ def print_timing_margin(results: list[TimingResult]):
 
 
 def print_metrics_table(results: list[dict]):
-    """Table 9: Key metrics by scenario group."""
+    """Print key metrics by scenario group."""
+    valid_types = {"VALID", "BOUNDARY_IN"}
     groups = defaultdict(list)
     for r in results:
         scenario = r["Scenario"]
@@ -203,8 +182,8 @@ def print_metrics_table(results: list[dict]):
             continue
 
         # Classify
-        valid = [r for r in group_results if r["VectorType"] == "VALID"]
-        invalid = [r for r in group_results if r["VectorType"] != "VALID"]
+        valid = [r for r in group_results if r["VectorType"] in valid_types]
+        invalid = [r for r in group_results if r["VectorType"] not in valid_types]
 
         n_valid = len(valid)
         n_invalid = len(invalid)
@@ -238,7 +217,8 @@ def print_metrics_table(results: list[dict]):
 
 
 def print_response_matrix(results: list[dict]):
-    """Table 10: Multi-dimensional response matrix."""
+    """Print the multi-dimensional response matrix."""
+    valid_types = {"VALID", "BOUNDARY_IN"}
     groups = defaultdict(list)
     for r in results:
         groups[r["Scenario"]].append(r)
@@ -251,23 +231,23 @@ def print_response_matrix(results: list[dict]):
 
     for scenario_name in sorted(groups.keys()):
         gr = groups[scenario_name]
-        n_valid = sum(1 for r in gr if r["VectorType"] == "VALID")
+        n_valid = sum(1 for r in gr if r["VectorType"] in valid_types)
         n_invalid = len(gr) - n_valid
 
         auth_pass = sum(1 for r in gr if r["z_auth"] == "PASS")
         auth_fail = sum(1 for r in gr if r["z_auth"] == "FAIL")
         fresh_pass = sum(1 for r in gr if r["z_fresh"] == "PASS")
         fresh_fail = sum(1 for r in gr if r["z_fresh"] == "FAIL")
-        d_app_legit = sum(1 for r in gr if r["d_app"] == 1 and r["VectorType"] == "VALID")
-        d_app_illegit = sum(1 for r in gr if r["d_app"] == 1 and r["VectorType"] != "VALID")
+        d_app_legit = sum(1 for r in gr if r["d_app"] == 1 and r["VectorType"] in valid_types)
+        d_app_illegit = sum(1 for r in gr if r["d_app"] == 1 and r["VectorType"] not in valid_types)
         rejected = sum(1 for r in gr if r["d_app"] == 0 and r["Verdict"] != "INCONCLUSIVE")
         resync = sum(1 for r in gr if r.get("a_resync") not in ("NONE", None))
         errors = sum(1 for r in gr if r.get("e") and r["e"] not in ("None", None))
         timeouts = sum(1 for r in gr if r.get("e") == "TIMEOUT")
 
         # IAR/FRR for this group
-        valid_c = [r for r in gr if r["VectorType"] == "VALID" and r["eta"] == "COMPLETE"]
-        invalid_c = [r for r in gr if r["VectorType"] != "VALID" and r["eta"] == "COMPLETE"]
+        valid_c = [r for r in gr if r["VectorType"] in valid_types and r["eta"] == "COMPLETE"]
+        invalid_c = [r for r in gr if r["VectorType"] not in valid_types and r["eta"] == "COMPLETE"]
         iar = sum(1 for r in invalid_c if r["d_app"] == 1) / len(invalid_c) if invalid_c else 0.0
         frr = sum(1 for r in valid_c if r["d_app"] == 0) / len(valid_c) if valid_c else 0.0
 
@@ -281,19 +261,15 @@ def print_response_matrix(results: list[dict]):
               f"{iar:>7.2%} {frr:>7.2%}")
 
 
-def run_config_mutations(all_results: list[dict]):
-    """Execute and report three controlled config mutations (Table 11).
-    M1: Rollover gating missing
-    M2: MAC length policy non-compliance
-    M3: Crypto context isolation insufficient
-    """
+def run_config_mutations():
+    """Execute and report three controlled configuration mutations."""
     print(f"  {'编号':<6s} {'变异类型':<24s} {'判定依据':<48s} {'结果':<6s}")
     print("  " + "-" * 90)
 
     key = b'\x00' * 16
     key2 = b'\x11' * 16
 
-    # ── M1: Rollover gating missing ──
+    # Rollover gating missing
     # Build a PDU with a genuine low FV (post-rollover candidate) and valid MAC.
     # Receiver at fv_last near 2^32-1. Baseline should block delivery;
     # PERMISSIVE config should allow delivery.
@@ -310,10 +286,10 @@ def run_config_mutations(all_results: list[dict]):
           f"{'非法回绕候选被交付且状态更新缺少受认证依据':<48s} "
           f"{'杀死' if m1_killed else '存活':<6s}")
 
-    # ── M2: MAC length policy non-compliance ──
+    # MAC length policy non-compliance
     cfg_m2 = copy.deepcopy(DEFAULT_CONFIG)
     cfg_m2.A = msg.auth_area
-    cfg_m2.ell = 16  # too short for declared (q=1000, θ=2⁻³²) policy
+    cfg_m2.ell = 16  # Too short for the configured forgery-risk threshold.
 
     q = 1000
     theta = 2 ** -32
@@ -325,7 +301,7 @@ def run_config_mutations(all_results: list[dict]):
           f"{'P_forge > θ, 配置风险超过声明阈值':<48s} "
           f"{'杀死' if m2_killed else '存活':<6s}")
 
-    # ── M3: Crypto context isolation insufficient ──
+    # Crypto context isolation insufficient
     # Build PDU with key2 for msg[2], present to receiver expecting msg[0] with key.
     # Baseline (separate contexts): different key → MAC reject
     # Mutation (shared context): same key → potentially accept
@@ -341,7 +317,7 @@ def run_config_mutations(all_results: list[dict]):
 
 
 def _test_m1_rollover(msg, cfg_base, cfg_m1, key) -> bool:
-    """M1: Test rollover gating.
+    """Test rollover gating.
     Build PDU with low FV (post-rollover), inject into receiver at near-max FV.
     Baseline (AUTH_RESTRICTED) should block delivery.
     Mutation (PERMISSIVE) should allow delivery → killed.
@@ -352,7 +328,7 @@ def _test_m1_rollover(msg, cfg_base, cfg_m1, key) -> bool:
 
     # Build PDU with FV=5 and valid MAC
     sender = SecOCSender(cfg_base, fm_tx)
-    payload = os.urandom(msg.payload_len)
+    payload = bytes(range(msg.payload_len))
     p_wire, _ = sender.build_secured_pdu(payload, msg.data_id, key)
     # P_wire has FV=5 with correct MAC — NO perturbation needed
 
@@ -375,7 +351,7 @@ def _test_m1_rollover(msg, cfg_base, cfg_m1, key) -> bool:
 
 
 def _test_m3_context(msg_a, msg_b, cfg_base, cfg_m3, key_a, key_b) -> bool:
-    """M3: Test crypto context isolation.
+    """Test crypto context isolation.
     Attacker uses msg_b's leaked key to forge a PDU for msg_a.
     Baseline (separate contexts): key_a ≠ key_b → MAC reject → PASS.
     Mutation (shared context): same key → MAC accept → FAIL → killed.
@@ -386,7 +362,7 @@ def _test_m3_context(msg_a, msg_b, cfg_base, cfg_m3, key_a, key_b) -> bool:
     cfg_tx = copy.deepcopy(cfg_base)
     cfg_tx.A = msg_a.auth_area
     sender = SecOCSender(cfg_tx, fm_tx)
-    payload = os.urandom(msg_a.payload_len)
+    payload = bytes(range(msg_a.payload_len))
     # Forge: use msg_a's data_id but msg_b's key
     p_wire, _ = sender.build_secured_pdu(payload, msg_a.data_id, key_b)
 
@@ -410,11 +386,11 @@ def _test_m3_context(msg_a, msg_b, cfg_base, cfg_m3, key_a, key_b) -> bool:
 
 
 def print_coverage(results: list[dict], scenarios: list[dict]):
-    """Eq.(42): Coverage breakdown."""
+    """Print coverage dimensions separately."""
     states_seen = set()
     for r in results:
         states_seen.add(r.get("StateBefore", "UNKNOWN"))
-    C_state = len(states_seen) / 4  # 4 states in Eq.(9)
+    C_state = len(states_seen) / 4
 
     # Config boundaries covered
     config_values = defaultdict(set)
@@ -437,8 +413,23 @@ def print_coverage(results: list[dict], scenarios: list[dict]):
           f"{len(config_values['W'])} window sizes")
     print(f"  C_operator   = {len(operators_seen)} perturbation types covered")
     print(f"  C_requirement = {len(vtypes_seen)} verdict types covered")
-    print(f"  (Eq.42 components reported separately — no single composite score)")
+    print("  (components reported separately; no composite score)")
+
+
+def parse_args(argv=None):
+    """Parse command-line options without starting an experiment run."""
+    parser = argparse.ArgumentParser(
+        description="Run the SecOC reference experiments.",
+    )
+    parser.add_argument(
+        "--output-dir",
+        type=Path,
+        default=OUTPUT_DIR,
+        help="directory for generated JSON and CSV files (default: results)",
+    )
+    return parser.parse_args(argv)
 
 
 if __name__ == "__main__":
-    main()
+    args = parse_args()
+    main(args.output_dir)

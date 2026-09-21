@@ -1,18 +1,12 @@
-"""
-Configuration model — Eq.(15) from the paper.
-Each SecOCConfig captures authentication length, freshness parameters,
-window, rollover policy, authentication area, crypto context mapping,
-timeout policy, and persistence policy.
-"""
+"""Configuration objects used by the SecOC reference implementation."""
 import hashlib
 import json
 from dataclasses import dataclass, field
-from typing import Optional
 
 
 @dataclass
 class SecOCConfig:
-    """Eq.(15): SecOC configuration for a message."""
+    """Security and receiver-policy settings for one message."""
     # Authentication
     ell: int = 64          # Truncated MAC length (bits)
     # Freshness
@@ -38,10 +32,36 @@ class SecOCConfig:
         raw = json.dumps(self.__dict__, sort_keys=True, default=str)
         return hashlib.sha256(raw.encode()).hexdigest()[:16]
 
+    def validate(self, payload_length: int | None = None) -> None:
+        """Reject settings that cannot be represented by this prototype."""
+        if not 8 <= self.ell <= 128 or self.ell % 8:
+            raise ValueError("MAC length must be a byte-aligned value from 8 to 128 bits")
+        if not 1 <= self.lambda_ <= self.b <= 32:
+            raise ValueError("freshness widths must satisfy 1 <= transmitted <= full <= 32")
+        if not 1 <= self.W < (1 << self.lambda_):
+            raise ValueError("receive window must fit within the transmitted freshness range")
+        offset, length = self.A
+        if offset < 0 or length <= 0:
+            raise ValueError("authenticated area must have a non-negative offset and positive length")
+        if payload_length is not None and offset + length > payload_length:
+            raise ValueError("authenticated area exceeds the payload")
+        if self.timeout_ms <= 0:
+            raise ValueError("timeout must be positive")
+        if self.rho not in {"AUTH_RESTRICTED", "PERMISSIVE"}:
+            raise ValueError("unsupported rollover policy")
+        if self.timeout_policy != "REJECT_AND_REPORT":
+            raise ValueError("unsupported timeout policy")
+        if self.persist_policy != "ON_AUTH_UPDATE":
+            raise ValueError("unsupported persistence policy")
+        if not 0 <= self.data_id <= 0xFFFF:
+            raise ValueError("DataID must fit in 16 bits")
+        if not isinstance(self.kappa, tuple) or len(self.kappa) != 3:
+            raise ValueError("crypto context must contain three references")
+
 
 @dataclass
 class MessageSpec:
-    """Eq.(14): Message definition — sensor/control semantics."""
+    """An anonymized message definition used to build test inputs."""
     can_id: int            # CAN ID
     data_id: int           # SecOC DataID
     src: str               # Source ECU
@@ -55,7 +75,7 @@ class MessageSpec:
     auth_area: tuple[int, int] = (0, 16)  # (offset, length) for authentication
 
 
-# ── Default messages (Table 6) ────────────────────────────────────────
+# ── Default messages ────────────────────────────────────────
 
 DEFAULT_MESSAGES = [
     MessageSpec(can_id=0x100, data_id=1, src="BMS", dst="VCU",
@@ -80,7 +100,7 @@ DEFAULT_MESSAGES = [
                 critical_positions=list(range(14)), auth_area=(0, 14)),
 ]
 
-# ── Default config (Section 5.3) ──────────────────────────────────────
+# ── Default config ──────────────────────────────────────
 
 DEFAULT_CONFIG = SecOCConfig(
     ell=64, lambda_=12, b=32, W=16,

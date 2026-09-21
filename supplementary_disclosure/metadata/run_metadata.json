@@ -1,6 +1,6 @@
 {
-  "run_id": "PYOBS-20260911T053920Z",
-  "generated_at_utc": "2026-09-11T05:39:20.932557+00:00",
+  "run_id": "PYOBS-20260921T013915Z",
+  "generated_at_utc": "2026-09-21T01:39:15.019884+00:00",
   "record_origin": "direct_python_execution",
   "system_under_test": "CAST-SecOC Python reference prototype",
   "model_generated_timing": false,
@@ -11,15 +11,21 @@
   "message_count": 5,
   "scenario_count": 5,
   "repetitions_per_message_scenario": 5,
+  "equivalence_candidate_count": 125,
+  "equivalence_class_count": 25,
+  "fixed_regression_vector_count": 25,
+  "mutant_count": 3,
+  "mutants_killed": 3,
+  "equivalence_scope": "125 disclosed deterministic candidate executions; payload bytes, repeat number and seed are excluded from the semantic signature",
   "python": "3.14.4 (main, Jun 18 2026, 14:25:02) [GCC 15.2.0]",
   "implementation": "CPython",
   "platform": "Linux-6.18.33.1-microsoft-standard-WSL2-x86_64-with-glibc2.43",
   "repository_source_hashes": {
-    "cast_secoc/config.py": "21c1dc63026a307f10604f41b38ee3a691aad71fb2fb0bc27c69c72af4a4b520",
-    "cast_secoc/freshness.py": "b2803527a73d799fa2f4d255ac5a4329182a284df10bbd71b550b0ff90b85ca3",
-    "cast_secoc/sender.py": "1fd4c7fa9276e0a28ef0d53efbb0d182f3db1e91df81351cc7b847d19d262fb9",
-    "cast_secoc/receiver.py": "e1104de2940117f76996e3a9aecb5c3b9288634c56ea7b0d8aa91628fc4571f5",
-    "cast_secoc/sm4.py": "a7fef81daae0f774d96513ff84b7fc279719a575f3e8debdac366b67664f55f2",
-    "cast_secoc/verdict.py": "9f13825df409b34d59314c7cc9b3869f16de5c730cce0c1b24878554fc571678"
+    "cast_secoc/config.py": "f73ae6beac644788f6563aca9b56ae92d07d25fb27ea282df5998e6c1287a056",
+    "cast_secoc/freshness.py": "2ca979b0f54bb15cd064007d55b511af78e8d7373b766b9a534d2ee18d3296e1",
+    "cast_secoc/sender.py": "bcbfcbd12219396a775b6ee53290b02b4a75e96793b8f832be331e6f3fe572ef",
+    "cast_secoc/receiver.py": "edef74870a860b53dfaa5dfe120f59b9e20c6d547621750bcffbe1adc291a8e6",
+    "cast_secoc/sm4.py": "09ca9f3775589b03c55daac9019704885c2cf6cc5984479ad4f054301e357713",
+    "cast_secoc/verdict.py": "aa5bfb1453dc84a29b076a680ed6ab49a9fdb95be8d90900f05280cd0b15a20a"
   }
 }

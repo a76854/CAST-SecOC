@@ -1,31 +1,23 @@
-"""
-Test Orchestrator — Algorithm 1 (cover-gain vector generation) +
-Algorithm 2 (execution, verdict, evidence).
-"""
-import copy
+"""Generate, execute, evaluate, and record SecOC test vectors."""
 import hashlib
-import json
 import os
 import random
-import struct
-import time
 from dataclasses import dataclass, field
-from .config import SecOCConfig, MessageSpec, DEFAULT_CONFIG
-from .freshness import FreshnessManager, RxState, FvRelation, FreshnessState
+from .config import SecOCConfig, MessageSpec
+from .freshness import FreshnessManager, RxState, FvRelation
 from .sender import SecOCSender
 from .receiver import SecOCReceiver
 from .bus import CanFDBus
 from .perturb import Perturbation, PerturbType, apply_perturbation
 from .verdict import (
-    VectorType, Verdict, determine, config_killed,
-    classify_defect, compute_metrics, E_CRITICAL, E_POLICY_REJECT
+    VectorType, Verdict, determine,
+    classify_defect, compute_metrics,
 )
-from .sm4 import sm4_cmac
 
 
 @dataclass
 class TestVector:
-    """Eq.(13): A complete test vector."""
+    """A complete executable test vector."""
     vector_id: int
     msg: MessageSpec
     target_state: RxState
@@ -51,7 +43,6 @@ class TestOrchestrator:
     def __init__(self, seed: int = 20260714, data_dir: str = "results"):
         self.seed = seed
         self.data_dir = data_dir
-        random.seed(seed)
         os.makedirs(data_dir, exist_ok=True)
 
         # Shared crypto key (per context)
@@ -65,7 +56,7 @@ class TestOrchestrator:
         self.evidence: list[dict] = []
         self.defects: list[dict] = []
 
-    # ── Algorithm 1: Cover-gain vector generation (§4.4) ────────────────
+    # ── Cover-gain vector generation ────────────────
 
     def generate_vectors(self, messages: list[MessageSpec],
                          states: list[RxState],
@@ -73,8 +64,8 @@ class TestOrchestrator:
                          configs: list[SecOCConfig],
                          perturbations: list[tuple[VectorType, Perturbation]],
                          budget: int = 2000) -> list[TestVector]:
-        """Cover-gain driven test vector selection — Algorithm 1."""
-        # Step 1-9: Generate candidate vectors with compatibility filtering
+        """Select vectors by deterministic marginal coverage gain."""
+        # Generate candidate vectors with compatibility filtering.
         candidates = []
         vid = 0
 
@@ -98,36 +89,60 @@ class TestOrchestrator:
                             )
                             candidates.append(tv)
 
-        # Step 10: Remove equivalent vectors
         candidates = self._dedup_vectors(candidates)
 
-        # Step 11-17: Cover-gain greedy selection
         selected = []
-        uncovered = set(range(len(candidates)))  # Simplified coverage model
+        covered = set()
 
         while len(selected) < budget and candidates:
-            # Pick highest-scoring candidate (simplified for lean impl)
-            idx = random.randint(0, len(candidates) - 1)
+            gains = [len(self._coverage_items(tv) - covered) for tv in candidates]
+            idx = max(
+                range(len(candidates)),
+                key=lambda i: (gains[i], -candidates[i].vector_id),
+            )
             tv = candidates.pop(idx)
             tv.execution_order = len(selected)
             selected.append(tv)
+            covered.update(self._coverage_items(tv))
 
         return selected
+
+    @staticmethod
+    def _coverage_items(tv: TestVector) -> set[tuple]:
+        """Return the individual and pairwise features covered by a vector."""
+        state = tv.target_state.name
+        relation = tv.fv_relation.name
+        perturbation = tv.perturbation.ptype.name
+        vector_type = tv.vector_type.value
+        return {
+            ("message", tv.msg.data_id),
+            ("state", state),
+            ("freshness_relation", relation),
+            ("perturbation", perturbation),
+            ("vector_type", vector_type),
+            ("mac_bits", tv.config.ell),
+            ("window", tv.config.W),
+            ("state_relation", state, relation),
+            ("message_perturbation", tv.msg.data_id, perturbation),
+        }
 
     def _compatible(self, msg: MessageSpec, state: RxState,
                     fv_rel: FvRelation, cfg: SecOCConfig,
                     perturb: Perturbation) -> bool:
-        """Eq.(16): Feasibility check for a candidate vector."""
-        # State-FV relation consistency
-        if state == RxState.SYNC and fv_rel == FvRelation.OUT_OF_WINDOW:
-            return False
-        if state == RxState.DESYNC and fv_rel == FvRelation.NEXT:
-            return False
+        """Check whether a candidate has a consistent, representable setup."""
         if state == RxState.ROLLOVER_PENDING and fv_rel not in (
                 FvRelation.WRAP_CANDIDATE, FvRelation.STALE):
             return False
-        # Perturbation cannot exceed payload
+        try:
+            cfg.validate(msg.payload_len)
+        except ValueError:
+            return False
+        if cfg.kappa[2] not in self.keys:
+            return False
         if perturb.tamper_positions and max(perturb.tamper_positions) >= msg.payload_len:
+            return False
+        if (perturb.ptype == PerturbType.REPLAY_HISTORICAL
+                and perturb.replay_pdu is None):
             return False
         return True
 
@@ -136,39 +151,58 @@ class TestOrchestrator:
         seen = set()
         unique = []
         for tv in candidates:
-            key = (tv.msg.data_id, tv.target_state, tv.fv_relation,
-                   tv.vector_type, tv.perturbation.ptype)
+            key = (
+                tv.msg.data_id,
+                tv.target_state,
+                tv.fv_relation,
+                tv.config.config_hash,
+                tv.vector_type,
+                tv.perturbation.ptype,
+                tuple(tv.perturbation.tamper_positions or []),
+                tv.perturbation.forge_mac_type,
+                tv.perturbation.fv_offset,
+                tv.perturbation.fv_force_value,
+                tv.perturbation.window_position,
+                tv.perturbation.cross_data_id,
+                tv.perturbation.target_load,
+            )
             if key not in seen:
                 seen.add(key)
                 unique.append(tv)
         return unique
 
-    # ── Algorithm 2: Execution, verdict, evidence (§4.7) ────────────────
+    # ── Execution, verdict, evidence ────────────────
 
     def execute_all(self, vectors: list[TestVector],
                     bus_loads: list[float] | None = None) -> dict:
-        """Execute all test vectors — Algorithm 2."""
+        """Execute every vector once across the requested bus loads."""
         if bus_loads is None:
             bus_loads = [0.30]
+        if not bus_loads:
+            raise ValueError("bus_loads must not be empty")
 
-        for tv in vectors:
-            self._execute_one(tv, bus_load=0.30)
+        for index, tv in enumerate(vectors):
+            if tv.perturbation.ptype == PerturbType.HIGH_LOAD:
+                bus_load = tv.perturbation.target_load
+            else:
+                bus_load = bus_loads[index % len(bus_loads)]
+            self._execute_one(tv, bus_load=bus_load)
 
         metrics = compute_metrics(self.results)
         return metrics
 
     def _execute_one(self, tv: TestVector, bus_load: float = 0.30) -> dict:
-        """Execute a single test vector and record evidence — Eq.(44)."""
-        # ── Line 3-4: Restore checkpoint ──
+        """Execute one vector and record its observable response."""
+        # Restore the receiver checkpoint.
         fm = FreshnessManager(bit_width=tv.config.b,
                               trunc_bits=tv.config.lambda_,
                               window=tv.config.W)
-        key = self.keys.get(tv.config.kappa[2], list(self.keys.values())[0])
+        key = self.keys[tv.config.kappa[2]]
 
-        # ── Line 5: Load config ──
+        # Capture the active configuration identity.
         config_hash = tv.config.config_hash
 
-        # ── Line 6-8: State preparation (Table 3) ──
+        # Prepare the requested receiver state.
         state_ok = self._prepare_state(fm, tv)
         if not state_ok:
             resp = dict(z_auth="NA", z_fresh="NA", d_app=0, a_resync="NONE",
@@ -180,31 +214,50 @@ class TestOrchestrator:
             self._record(tv, resp, verdict, config_hash)
             return resp
 
-        # ── Line 10: Build stimulus ──
-        sender = SecOCSender(tv.config, fm)
-        payload = os.urandom(tv.msg.payload_len)
+        # Build the secured input.
+        case_rng = random.Random(self.seed + tv.vector_id)
+        payload = case_rng.randbytes(tv.msg.payload_len)
         auth_ipdu = payload
-        p_wire, tx_time = sender.build_secured_pdu(auth_ipdu, tv.msg.data_id, key)
+        authenticated_boundary = tv.perturbation.ptype in {
+            PerturbType.WINDOW_BOUNDARY,
+            PerturbType.ROLLOVER_CANDIDATE,
+        }
+        if authenticated_boundary:
+            fm_tx = FreshnessManager(tv.config.b, tv.config.lambda_, tv.config.W)
+            if tv.perturbation.ptype == PerturbType.WINDOW_BOUNDARY:
+                fm_tx._counter = fm.rx_state.fv_last + tv.perturbation.window_position
+            else:
+                fm_tx._counter = tv.perturbation.window_position
+            sender = SecOCSender(tv.config, fm_tx)
+        elif tv.fv_relation != FvRelation.NEXT:
+            fm_tx = FreshnessManager(tv.config.b, tv.config.lambda_, tv.config.W)
+            modulus = 1 << tv.config.b
+            if tv.fv_relation == FvRelation.STALE:
+                fm_tx._counter = max(0, fm.rx_state.fv_last - 1)
+            elif tv.fv_relation == FvRelation.IN_WINDOW_GAP:
+                fm_tx._counter = (fm.rx_state.fv_last + min(2, tv.config.W)) % modulus
+            elif tv.fv_relation == FvRelation.OUT_OF_WINDOW:
+                fm_tx._counter = (fm.rx_state.fv_last + tv.config.W + 1) % modulus
+            elif tv.fv_relation == FvRelation.WRAP_CANDIDATE:
+                fm_tx._counter = 0
+            sender = SecOCSender(tv.config, fm_tx)
+        else:
+            sender = SecOCSender(tv.config, fm)
+        p_wire, _ = sender.build_secured_pdu(auth_ipdu, tv.msg.data_id, key)
 
-        # Apply perturbation
-        p_wire = apply_perturbation(p_wire, tv.perturbation, tv.config)
+        if not authenticated_boundary:
+            p_wire = apply_perturbation(p_wire, tv.perturbation, tv.config, case_rng)
 
         # Bus transmission delay
-        bus = CanFDBus(load=bus_load)
+        bus = CanFDBus(load=bus_load, rng=case_rng)
         bus_delay = bus.transmit(len(p_wire))
 
-        # ── Line 11: Process at receiver ──
+        # Process the input at the receiver.
         receiver = SecOCReceiver(tv.config, fm, key)
 
         # For cross-context: use wrong key if specified
         if tv.perturbation.ptype == PerturbType.CROSS_CONTEXT:
-            wrong_key = self.keys.get(1, key)
-            resp = receiver.process(p_wire, tv.msg.data_id)
-            # Cross-context: the MAC was generated with correct key
-            # but if receiver uses wrong key, auth should fail
-            # Actually: we need to test that cross-context INPUT
-            # (generated with key_1) is accepted when it shouldn't be.
-            # So we generate with cross key, verify with correct key
+            wrong_key = tv.perturbation.cross_key or self.keys[1]
             fm2 = FreshnessManager(bit_width=tv.config.b,
                                    trunc_bits=tv.config.lambda_,
                                    window=tv.config.W)
@@ -219,28 +272,28 @@ class TestOrchestrator:
 
         # Add bus delay to response time
         resp["tau"] += bus_delay
+        resp["rx_state_before"] = tv.target_state.name
         tv.stimulus = p_wire
         tv.response = resp
 
-        # ── Line 12-15: Verdict + defect classification ──
+        # Evaluate the response and classify any failure.
         verdict = determine(tv.vector_type, resp, tv.msg.deadline_ms)
         tv.verdict = verdict
 
         if verdict == Verdict.FAIL:
-            defects = classify_defect(tv.vector_type, resp,
-                                      DEFAULT_CONFIG, tv.config,
-                                      tv.msg.critical_positions)
+            defects = classify_defect(
+                tv.vector_type, resp, tv.config, tv.msg.critical_positions,
+            )
             tv.defect_labels = defects
             self.defects.append(dict(
                 vector_id=tv.vector_id, config_hash=config_hash,
                 response=resp, defects=defects))
 
-        # ── Line 16: Record evidence — Eq.(44) ──
         self._record(tv, resp, verdict, config_hash)
         return resp
 
     def _prepare_state(self, fm: FreshnessManager, tv: TestVector) -> bool:
-        """Prepare receiver state per Table 3."""
+        """Prepare the requested receiver state."""
         state = tv.target_state
         if state == RxState.SYNC:
             fm.prepare_sync(fv_start=100)
@@ -259,7 +312,7 @@ class TestOrchestrator:
 
     def _record(self, tv: TestVector, resp: dict, verdict: str,
                 config_hash: str) -> None:
-        """Record evidence per Eq.(44)."""
+        """Record the observable evidence for one vector."""
         record = dict(
             VectorID=tv.vector_id,
             ConfigID=tv.config.msg_id,

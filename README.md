@@ -1,49 +1,45 @@
-# CAST-SecOC 最小披露材料
+# CAST-SecOC 公开参考实现
 
-本目录用于支持论文中 Python 参考原型的功能实验来源核验。
+本目录包含 CAST-SecOC 的纯 Python SecOC 参考实现、可重复执行的功能与安全测试场景，以及一组由参考实现直接生成的运行记录。
 
-## 证据边界
+## 内容边界
 
-- 被测对象：CAST-SecOC Python 参考原型。
-- 可支持的结论：所披露功能记录来自 Python 程序的实际执行；配置、输入摘要、响应、判定和运行环境可以关联核验。
-- 不支持的结论：这些记录不是嵌入式 C 实现、AUTOSAR 商业栈或 TC397 开发板的实测结果。
-- `HostElapsedNs` 是运行 Python 原型时观察到的主机墙钟时间，只用于记录本次执行，不用于评价目标 ECU 实时性。
-- 本包不包含仓库中已有的 TC397 参数化合成时延文件。
+- 本实现演示报文认证、截断新鲜度值处理、接收窗口检查、回绕门控、重放拒绝和密码上下文隔离。
+- 消息标识、ECU 名称、配置值和密钥均为匿名化测试值。
+- `cast_secoc.main` 生成的 TC397 时延数据来自参数化合成模型，不是嵌入式硬件实测数据。
+- 功能场景的时限判定采用固定 1 ms 处理时间与带固定种子的 CAN FD 排队模型，因此场景判定可以跨主机复现。
+- CAN FD 排队模型是简化的随机模型，不等同于完整的 CAN 仲裁过程或 AUTOSAR 协议栈。
 
-## 目录内容
+## 运行环境
 
-- `generate_observed_records.py`：固定输入并执行代表性测试的生成程序。
-- `config/config_snapshot.json`：本次披露使用的匿名化消息和 SecOC 配置。
-- `code/selected_core_excerpts.txt`：从实际执行版本导出的关键函数原文及原文件哈希。
-- `data/selected_execution_records.csv`：逐条直接执行记录。
-- `data/scenario_summary.csv`：由逐条记录计算的场景汇总。
-- `metadata/run_metadata.json`：运行时间、解释器、平台、种子和数据性质。
-- `MANIFEST.sha256`：除自身外所有披露文件的 SHA-256。
+需要 Python 3.10 或更高版本，无第三方运行时依赖。
 
-## 数据规模
+## 运行完整场景集
 
-材料覆盖 5 类匿名化消息，每类消息执行以下 5 个场景，每个组合重复 5 次，共 125 条：
-
-1. 合法基准通信；
-2. 受认证区域内载荷篡改；
-3. 全零认证器伪造；
-4. 已接收报文重放；
-5. 严格策略下的 FV 回绕候选。
-
-该数据是代表性披露子集，不应替代论文对完整实验总体、抽样规则和样本数量的说明。
-
-## 重新生成
-
-在仓库根目录执行：
+在本目录执行：
 
 ```bash
-.venv/bin/python supplementary_disclosure_A/generate_observed_records.py
+python -m cast_secoc.main --output-dir results
 ```
 
-脚本会覆盖本目录内的配置快照、代码摘录、数据、元数据和哈希清单。重新执行会获得新的
-`RunId` 和主机耗时；固定测试输入、协议响应和判定应保持一致。
+该命令执行 2,000 条测试向量，并在指定输出目录中生成 `results.json`、`timing.json` 和 `timing.csv`。
 
-## 脱敏说明
+如需查看命令行选项而不启动实验，请执行：
 
-PDU-A 至 PDU-E、CAN ID、DataID、ECU 名称和测试密钥均属于公开原型中的匿名化测试值，
-不得解释为量产车型资产或生产密钥。测试密钥只记录其指纹，不写入逐条数据。
+```bash
+python -m cast_secoc.main --help
+```
+
+## 重新生成直接观测记录
+
+```bash
+python supplementary_disclosure/generate_observed_records.py
+```
+
+该命令会重新生成直接执行记录、等价类映射、固定回归集、mutant set、配置快照和运行元数据。
+固定输入和协议判定结果可以复现；运行标识和主机墙钟耗时会随执行时间与环境变化。
+
+## 目录结构
+
+- `cast_secoc/`：协议模型、场景生成、需求判定和命令行入口。
+- `supplementary_disclosure/`：直接观测记录、配置快照、运行元数据及生成程序。

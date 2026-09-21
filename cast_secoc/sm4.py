@@ -4,7 +4,7 @@ Pure Python — zero external dependencies.
 """
 import struct
 import time
-from typing import Callable, Optional
+from typing import Callable
 
 
 # ── SM4 S-box (GMT 0002-2012) ──────────────────────────────────────────
@@ -89,6 +89,8 @@ def _expand_key(key: bytes) -> list[int]:
     """Generate 32 round keys from 128-bit key.
     rk_i = K_i ⊕ T'(K_{i+1} ⊕ K_{i+2} ⊕ K_{i+3} ⊕ CK_i)
     """
+    if len(key) != 16:
+        raise ValueError("SM4 key must be 16 bytes")
     MK = list(struct.unpack('>4I', key))
     K = [MK[i] ^ _FK[i] for i in range(4)]
     rk = []
@@ -110,8 +112,10 @@ def _sm4_block_encrypt(block: bytes, rk: list[int]) -> bytes:
 
 def sm4_encrypt(plain: bytes, key: bytes) -> bytes:
     """SM4 ECB encrypt. plain must be multiple of 16 bytes."""
-    assert len(key) == 16, "SM4 key must be 16 bytes"
-    assert len(plain) % 16 == 0, "Plaintext must be multiple of 16 bytes"
+    if len(key) != 16:
+        raise ValueError("SM4 key must be 16 bytes")
+    if len(plain) % 16:
+        raise ValueError("plaintext must be a multiple of 16 bytes")
     rk = _expand_key(key)
     return b''.join(_sm4_block_encrypt(plain[i:i+16], rk) for i in range(0, len(plain), 16))
 
@@ -137,7 +141,8 @@ _RB = b'\x00' * 15 + b'\x87'  # R_128 constant for GF(2^128)
 
 def sm4_cmac(key: bytes, data: bytes) -> bytes:
     """SM4-CMAC — returns 128-bit (16-byte) tag. key must be 16 bytes."""
-    assert len(key) == 16, "SM4 key must be 16 bytes"
+    if len(key) != 16:
+        raise ValueError("SM4 key must be 16 bytes")
     rk = _expand_key(key)
 
     # Generate subkeys
@@ -191,17 +196,16 @@ def _self_test() -> None:
     ct = sm4_encrypt(plain, key)
     assert ct == expected_ct, f"SM4 encrypt failed: {ct.hex()} != {expected_ct.hex()}"
 
-    # CMAC test: verify deterministic
+    # CMAC value independently cross-checked with OpenSSL's SM4-CBC CMAC.
     k = b'\x00' * 16
     t1 = sm4_cmac(k, b'Hello')
-    t2 = sm4_cmac(k, b'Hello')
-    assert t1 == t2, "CMAC should be deterministic"
+    expected_cmac = bytes.fromhex("4619B5591C17886A974F64B19218371E")
+    assert t1 == expected_cmac, f"SM4-CMAC failed: {t1.hex()} != {expected_cmac.hex()}"
 
     # CMAC: different messages produce different tags
     t3 = sm4_cmac(k, b'World')
     assert t1 != t3, "CMAC should differ for different messages"
 
-    print("[sm4] Self-test passed — SM4-ECB + CMAC OK")
-
-
-_self_test()
+if __name__ == "__main__":
+    _self_test()
+    print("SM4 self-test passed")

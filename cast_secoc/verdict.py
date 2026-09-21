@@ -1,14 +1,9 @@
-"""
-Verdict Engine — multi-dimensional demand determination.
-Eqs.(20)–(37) from the paper.
-"""
-import math
+"""Requirement-oriented verdicts, defect labels, and aggregate metrics."""
 from enum import Enum
-from .freshness import RxState
 
 
 class VectorType(Enum):
-    """Eq.(19): Vector demand type."""
+    """Expected behavior category for a test vector."""
     VALID = "VALID"
     TAMPER = "TAMPER"
     REPLAY = "REPLAY"
@@ -29,7 +24,7 @@ E_POLICY_REJECT = {"TIMEOUT", "PARSE_ERROR_SHORT"}
 
 
 def determine(vtype: VectorType, resp: dict, deadline_ms: float | None = None) -> str:
-    """Eq.(20): Top-level determination.
+    """Evaluate one response against its expected behavior.
     Returns PASS, FAIL, or INCONCLUSIVE.
     """
     eta = resp.get("eta", "COMPLETE")
@@ -38,6 +33,8 @@ def determine(vtype: VectorType, resp: dict, deadline_ms: float | None = None) -
         return Verdict.INCONCLUSIVE
 
     predicate = _predicate_for(vtype)
+    if predicate is None:
+        return Verdict.INCONCLUSIVE
 
     try:
         satisfied = predicate(resp, deadline_ms)
@@ -59,10 +56,10 @@ def _predicate_for(vtype: VectorType):
         VectorType.BOUNDARY_OUT: _phi_boundary_out,
         VectorType.CONFIG: _phi_config,
         VectorType.LOAD: _phi_load,
-    }.get(vtype, lambda r, d: True)
+    }.get(vtype)
 
 
-# ── Eq.(21): Valid message predicate ───────────────────────────────
+# ── Valid message predicate ───────────────────────────────
 
 def _phi_valid(resp: dict, deadline_ms: float | None) -> bool:
     z_auth = resp["z_auth"]
@@ -80,13 +77,13 @@ def _phi_valid(resp: dict, deadline_ms: float | None) -> bool:
     if deadline_ms is not None:
         ok = ok and (tau * 1000 <= deadline_ms)
 
-    if e and e in E_CRITICAL:
+    if e and any(e.startswith(code) for code in E_CRITICAL):
         ok = False
 
     return ok
 
 
-# ── Eq.(22): Tamper/forge predicate ─────────────────────────────────
+# ── Tamper/forge predicate ─────────────────────────────────
 
 def _phi_tamper(resp: dict, deadline_ms: float | None) -> bool:
     d_app = resp["d_app"]
@@ -110,7 +107,7 @@ def _phi_tamper(resp: dict, deadline_ms: float | None) -> bool:
     return detected
 
 
-# ── Eq.(23): Replay predicate ───────────────────────────────────────
+# ── Replay predicate ───────────────────────────────────────
 
 def _phi_replay(resp: dict, deadline_ms: float | None) -> bool:
     d_app = resp["d_app"]
@@ -134,7 +131,7 @@ def _phi_replay(resp: dict, deadline_ms: float | None) -> bool:
     return detected
 
 
-# ── Eq.(24): Boundary-in predicate ──────────────────────────────────
+# ── Boundary-in predicate ──────────────────────────────────
 
 def _phi_boundary_in(resp: dict, deadline_ms: float | None) -> bool:
     z_auth = resp["z_auth"]
@@ -154,7 +151,7 @@ def _phi_boundary_in(resp: dict, deadline_ms: float | None) -> bool:
     return ok
 
 
-# ── Eq.(25): Boundary-out predicate ─────────────────────────────────
+# ── Boundary-out predicate ─────────────────────────────────
 
 def _phi_boundary_out(resp: dict, deadline_ms: float | None) -> bool:
     d_app = resp["d_app"]
@@ -176,7 +173,7 @@ def _phi_boundary_out(resp: dict, deadline_ms: float | None) -> bool:
     return True
 
 
-# ── Eq.(26): Config mutation killed ────────────────────────────────
+# ── Config mutation killed ────────────────────────────────
 
 def config_killed(baseline_verdict: str, mutation_verdict: str,
                   load_rejected: bool = False) -> bool:
@@ -201,18 +198,17 @@ def _phi_config(resp: dict, deadline_ms: float | None) -> bool:
     return True
 
 
-# ── Eq.(27): High-load predicate ────────────────────────────────────
+# ── High-load predicate ────────────────────────────────────
 
 def _phi_load(resp: dict, deadline_ms: float | None) -> bool:
-    """Delegates to valid or tamper/replay based on vector classification."""
-    # The orchestrator handles this — we use type-specific logic
-    return True
+    """Evaluate load-only vectors as valid traffic under a deadline."""
+    return _phi_valid(resp, deadline_ms)
 
 
-# ── Defect classification — Eq.(28)–(37) ──────────────────────────────
+# ── Defect classification ──────────────────────────────
 
 def classify_defect(vtype: VectorType, resp: dict,
-                    config_baseline, config_mutation,
+                    config,
                     critical_positions: list[int] | None = None) -> list[str]:
     """Classify defects from a FAIL verdict. Returns list of defect labels."""
     defects = []
@@ -225,48 +221,45 @@ def classify_defect(vtype: VectorType, resp: dict,
     if critical_positions is None:
         critical_positions = []
 
-    # D_area — Eq.(28): Auth area omission
+    # D_area: Auth area omission
     # If a critical position is outside auth area and msg was delivered
-    o, n = config_baseline.A if config_baseline else (0, 0)
+    o, n = config.A if config else (0, 0)
     for j in critical_positions:
         if j < o or j >= o + n:
             if z_auth == "PASS" and d_app == 1:
                 defects.append("D_area")
                 break
 
-    # D_failopen — Eq.(29): Auth fail but still delivered
+    # D_failopen: Auth fail but still delivered
     if z_auth == "FAIL" and d_app == 1:
         defects.append("D_failopen")
 
-    # D_rollback — Eq.(30): Historical FV accepted
-    fv_last_after = resp.get("fv_last_after", 0)
-    # Detected via replay vector type — if delivered, it's rollback
+    # D_rollback: Historical FV accepted
     if vtype == VectorType.REPLAY and d_app == 1:
         defects.append("D_rollback")
 
-    # D_window — Eq.(31): Out-of-window accepted
+    # D_window: Out-of-window accepted
     if vtype == VectorType.BOUNDARY_OUT and d_app == 1:
         defects.append("D_window")
 
-    # D_rollover — Eq.(32): Rollover gating missing
-    if d_app == 1 and a_resync != "AUTHENTICATED":
-        # Check if this was a rollover candidate
-        if resp.get("rx_state_after") == "ROLLOVER_PENDING":
-            defects.append("D_rollover")
+    # D_rollover: Rollover gating missing
+    if (d_app == 1 and a_resync != "AUTHENTICATED"
+            and resp.get("rx_state_before") == "ROLLOVER_PENDING"):
+        defects.append("D_rollover")
 
-    # D_unauth_update — Eq.(33): Unauthenticated state update
+    # D_unauth_update: Unauthenticated state update
     if nu_state == "UPDATED_UNAUTH":
         defects.append("D_unauth_update")
 
-    # D_context — Eq.(34): Crypto context isolation insufficient
+    # D_context: Crypto context isolation insufficient
     if vtype == VectorType.CONFIG and d_app == 1:
         # More specific check in orchestrator
         defects.append("D_context")
 
-    # D_authlen — Eq.(35)–(36): MAC length policy violation
+    # D_authlen: MAC length policy violation
     # Checked at config load time by orchestrator
 
-    # D_availability — Eq.(37): Valid msg not delivered or timeout
+    # D_availability: Valid msg not delivered or timeout
     if vtype == VectorType.VALID:
         if d_app == 0:
             defects.append("D_availability")
@@ -276,37 +269,47 @@ def classify_defect(vtype: VectorType, resp: dict,
     return defects if defects else ["D_unknown"]
 
 
-# ── Metric calculations — Eq.(38)–(43) ──────────────────────────────
+# ── Metric calculations ──────────────────────────────
 
 def compute_metrics(results: list[dict]) -> dict:
-    """Compute IAR, FRR, IR, MS from test results."""
+    """Compute invalid-acceptance, false-rejection, and inconclusive rates."""
     n_executed = len(results)
     if n_executed == 0:
         return {}
 
-    # Count by type
-    invalid_conclusive = [r for r in results
-                          if r.get("vector_type") != VectorType.VALID
-                          and r.get("verdict") != Verdict.INCONCLUSIVE]
-    valid_conclusive = [r for r in results
-                        if r.get("vector_type") == VectorType.VALID
-                        and r.get("verdict") != Verdict.INCONCLUSIVE]
-    inconclusive = [r for r in results
-                    if r.get("verdict") == Verdict.INCONCLUSIVE]
+    def vector_type(record):
+        value = record.get("vector_type", record.get("VectorType"))
+        return value.value if isinstance(value, VectorType) else value
 
-    # IAR — Eq.(38): Invalid messages wrongly delivered
+    def verdict(record):
+        return record.get("verdict", record.get("Verdict"))
+
+    valid_types = {VectorType.VALID.value, VectorType.BOUNDARY_IN.value}
+    invalid_conclusive = [
+        r for r in results
+        if vector_type(r) not in valid_types
+        and verdict(r) != Verdict.INCONCLUSIVE
+    ]
+    valid_conclusive = [
+        r for r in results
+        if vector_type(r) in valid_types
+        and verdict(r) != Verdict.INCONCLUSIVE
+    ]
+    inconclusive = [r for r in results if verdict(r) == Verdict.INCONCLUSIVE]
+
+    # IAR: Invalid messages wrongly delivered
     n_invalid = len(invalid_conclusive)
     n_invalid_delivered = sum(1 for r in invalid_conclusive
-                              if r.get("d_app") == 1 and r.get("verdict") == Verdict.FAIL)
+                              if r.get("d_app") == 1)
     iar = n_invalid_delivered / n_invalid if n_invalid > 0 else 0.0
 
-    # FRR — Eq.(39): Valid messages not delivered by deadline
+    # FRR: Valid messages not delivered by deadline
     n_valid = len(valid_conclusive)
     n_valid_missed = sum(1 for r in valid_conclusive
-                         if r.get("d_app") == 0 or r.get("verdict") == Verdict.FAIL)
+                         if r.get("d_app") == 0 or verdict(r) == Verdict.FAIL)
     frr = n_valid_missed / n_valid if n_valid > 0 else 0.0
 
-    # IR — Eq.(40): Inconclusive rate
+    # IR: Inconclusive rate
     ir = len(inconclusive) / n_executed
 
     return {
